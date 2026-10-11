@@ -294,37 +294,60 @@ def analyze_one(market: str, code: str, timeframe: str, horizon: int) -> dict:
 
 @st.cache_data(ttl=6 * 60 * 60, show_spinner=False)
 def fetch_us_universe():
-    """Fetch current US-listed symbols from Nasdaq Trader's public directories."""
+    """Fetch US-listed common-equity symbols and exclude non-common instruments."""
     urls = [
         "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt",
         "https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt",
     ]
     symbols = []
     headers = {"User-Agent": "Mozilla/5.0 GPR-Market-Scanner/1.0"}
+    # Explicit instrument markers, rather than treating every directory row as a stock.
+    non_common = (
+        " exchange traded fund", " etf", " fund", " warrant", " rights", " right",
+        " units", " unit", " preferred stock", " preferred shares", " depositary share",
+        " senior note", " subordinated note", " notes due", " debenture", " bond",
+        " etn", " exchange traded note", " index fund", " money market", " mutual fund",
+        " when issued", " when distributed", " subscription receipt", " contingent value right",
+    )
     for url in urls:
-        response = requests.get(url, timeout=20, headers=headers)
+        response = requests.get(url, timeout=25, headers=headers)
         response.raise_for_status()
         lines = response.text.splitlines()
         if not lines:
             continue
-        header = lines[0].split("|")
-        symbol_idx = 0
-        test_idx = header.index("Test Issue") if "Test Issue" in header else None
+        header = [x.strip() for x in lines[0].split("|")]
+        index = {name: i for i, name in enumerate(header)}
+        symbol_key = "Symbol" if "Symbol" in index else ("CQS Symbol" if "CQS Symbol" in index else "ACT Symbol")
+        symbol_idx = index.get(symbol_key, 0)
+        name_idx = index.get("Security Name")
+        test_idx = index.get("Test Issue")
+        etf_idx = index.get("ETF")
+        financial_idx = index.get("Financial Status")
         for line in lines[1:]:
             if not line or line.startswith("File Creation Time"):
                 continue
             fields = line.split("|")
             if len(fields) <= symbol_idx:
                 continue
-            symbol = fields[symbol_idx].strip()
-            if test_idx is not None and len(fields) > test_idx and fields[test_idx].strip() == "Y":
+            symbol = fields[symbol_idx].strip().upper()
+            name = fields[name_idx].strip().lower() if name_idx is not None and len(fields) > name_idx else ""
+            test = fields[test_idx].strip().upper() if test_idx is not None and len(fields) > test_idx else "N"
+            etf = fields[etf_idx].strip().upper() if etf_idx is not None and len(fields) > etf_idx else "N"
+            financial = fields[financial_idx].strip().upper() if financial_idx is not None and len(fields) > financial_idx else "N"
+            if not symbol or test == "Y" or etf == "Y":
                 continue
-            # Yahoo uses '-' for share-class dots (e.g. BRK-B); discard malformed directory rows.
-            if symbol and symbol not in {"Symbol", "ACT Symbol"} and all(c.isalnum() or c in ".-^" for c in symbol):
-                symbols.append(symbol.replace(".", "-"))
+            if financial in {"D", "E", "G", "H", "J", "K", "Q"}:
+                continue
+            if any(marker in name for marker in non_common):
+                continue
+            # Only symbols that Yahoo Finance can represent reliably are retained.
+            if not all(c.isalnum() or c in ".-^" for c in symbol):
+                continue
+            # Some exchange directory symbols are class shares; Yahoo uses hyphens.
+            symbols.append(symbol.replace(".", "-"))
     symbols = list(dict.fromkeys(symbols))
     if len(symbols) < 1000:
-        raise RuntimeError("Direktori saham AS tidak lengkap/berhasil diunduh.")
+        raise RuntimeError(f"Direktori saham AS tidak lengkap setelah filter ({len(symbols)} simbol).")
     return symbols
 
 
@@ -357,57 +380,53 @@ def fetch_crypto_universe():
 
 @st.cache_data(ttl=6 * 60 * 60, show_spinner=False)
 def fetch_idx_universe():
-    """Fetch IDX tickers from structured company-list tables; never scrape arbitrary 4-letter words."""
-    urls = [
-        "https://www.idx.id/id/perusahaan-tercatat/profil-perusahaan-tercatat/",
-        "https://block.idx.id/id/data-pasar/data-saham/daftar-saham/",
-        "https://www.idx.co.id/id/data-pasar/ringkasan-perdagangan/ringkasan-saham/",
-    ]
-    headers = {"User-Agent": "Mozilla/5.0 GPR-Market-Scanner/1.0"}
-    found = []
-    for url in urls:
+    """Fetch all listed IDX company codes from the IDX DataTables JSON endpoint."""
+    url = "https://www.idx.co.id/primary/ListedCompany/GetCompanyProfiles"
+    params = {"start": 0, "length": 9999, "code": ""}
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/128 Safari/537.36",
+        "Accept": "application/json, text/plain, */*",
+        "Referer": "https://www.idx.co.id/id/perusahaan-tercatat/profil-perusahaan-tercatat/",
+    }
+    payload = None
+    errors = []
+    # IDX sometimes blocks the standard requests TLS fingerprint. Try browser-like
+    # TLS via curl_cffi when available, then use requests as a fallback.
+    try:
+        from curl_cffi import requests as curl_requests
+        response = curl_requests.get(url, params=params, headers=headers, impersonate="chrome", timeout=30)
+        response.raise_for_status()
+        payload = response.json()
+    except Exception as exc:
+        errors.append(f"browser-like request: {type(exc).__name__}")
+    if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
         try:
-            response = requests.get(url, timeout=20, headers=headers)
+            response = requests.get(url, params=params, headers=headers, timeout=30)
             response.raise_for_status()
-            # Parse table rows/columns only. Regex over the whole HTML wrongly counts
-            # unrelated four-letter words as tickers (the source of the inflated 1,404).
-            tables = pd.read_html(response.text)
-            for table in tables:
-                if table.empty:
-                    continue
-                cols = [str(c).strip().lower() for c in table.columns]
-                ticker_col = None
-                for i, col in enumerate(cols):
-                    if any(word in col for word in ("kode", "code", "ticker", "symbol")):
-                        ticker_col = i
-                        break
-                if ticker_col is None:
-                    # Some IDX tables have a generic first column containing ranking,
-                    # followed by the ticker code in the second column.
-                    for i in range(min(3, len(cols))):
-                        sample = table.iloc[:, i].astype(str).str.strip().str.upper()
-                        matches = sample.str.fullmatch(r"[A-Z]{4,5}").sum()
-                        if matches >= 5:
-                            ticker_col = i
-                            break
-                if ticker_col is None:
-                    continue
-                for value in table.iloc[:, ticker_col].astype(str):
-                    symbol = value.strip().upper()
-                    if symbol in {"KODE", "CODE", "TICKER", "SYMBOL", "NAN", "NONE"}:
-                        continue
-                    if __import__("re").fullmatch(r"[A-Z]{4,5}", symbol):
-                        found.append(symbol)
-        except Exception:
-            continue
-    found = list(dict.fromkeys(found))
-    # Accept live source only when it looks like a complete directory, not a single
-    # paginated table or a page whose HTML did not render the data.
-    if 800 <= len(found) <= 1200:
-        return found, f"Direktori tabel IDX terstruktur ({len(found)} kode unik; refresh tiap 6 jam)"
-    # Fallback is intentionally labeled; never pretend it is a complete current IDX list.
+            payload = response.json()
+        except Exception as exc:
+            errors.append(f"standard request: {type(exc).__name__}")
+            payload = None
+    if isinstance(payload, dict) and isinstance(payload.get("data"), list):
+        records = payload["data"]
+        total = int(payload.get("recordsTotal") or payload.get("recordsFiltered") or len(records))
+        found = []
+        for row in records:
+            if not isinstance(row, dict):
+                continue
+            symbol = str(row.get("KodeEmiten", row.get("kodeEmiten", ""))).strip().upper()
+            if __import__("re").fullmatch(r"[A-Z0-9]{4,5}", symbol):
+                found.append(symbol)
+        found = list(dict.fromkeys(found))
+        # Only call it complete if the API returned all rows it says exist.
+        if total >= 800 and len(found) >= min(total, 800) and len(found) >= total * 0.90:
+            return found, f"API direktori resmi IDX ({len(found)}/{total} kode; cache 6 jam)"
+        errors.append(f"API hanya mengembalikan {len(found)} dari {total} data")
+    # Fallback is intentionally explicit; never report it as the complete IDX universe.
     fallback = list(dict.fromkeys(FALLBACK_CODES))
-    return fallback, f"Fallback BEI ({len(fallback)} kode unik); direktori IDX lengkap gagal dimuat, daftar perlu diverifikasi"
+    reason = "; ".join(errors) if errors else "format respons IDX tidak sesuai"
+    return fallback, f"FALLBACK BEI ({len(fallback)} kode) — direktori resmi gagal dimuat ({reason}); universe tidak lengkap"
+
 
 
 def get_universe(market: str):
@@ -480,7 +499,7 @@ left.metric("Aset tersedia", len(codes))
 mid.metric("Target scan", target_count)
 right.markdown(f"**Sumber data:** Yahoo Finance  \n<span class='note'>{universe_source}</span>", unsafe_allow_html=True)
 
-st.info("IDX diambil dari kolom kode saham pada tabel publik (bukan hasil pencarian teks seluruh halaman). Jika direktori lengkap gagal dimuat, aplikasi memakai daftar cadangan dan menandainya. Scan manual tersedia per 100/200/300/400/500 aset; mode otomatis melanjutkan per 100 sampai target, sehingga bisa berjalan lama dan terkena rate limit.")
+st.info("Universe IDX memakai endpoint direktori perusahaan tercatat BEI dengan pagination panjang. Jika sumber resmi diblokir atau respons tidak lengkap, aplikasi menandai penggunaan fallback dan tidak mengklaim daftar itu lengkap. Universe AS mengecualikan banyak instrumen non-saham (ETF, warrant, unit, preferred, notes, dan sejenisnya). Scan manual tersedia per 100/200/300/400/500 aset; mode otomatis melanjutkan per 100 sampai target.")
 
 if scan_next:
     if state["cursor"] >= target_count:
