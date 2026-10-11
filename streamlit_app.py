@@ -357,10 +357,11 @@ def fetch_crypto_universe():
 
 @st.cache_data(ttl=6 * 60 * 60, show_spinner=False)
 def fetch_idx_universe():
-    """Try IDX's public listed-company page; fall back to the bundled symbol list."""
+    """Fetch IDX tickers from structured company-list tables; never scrape arbitrary 4-letter words."""
     urls = [
-        "https://www.idx.id/id/data-pasar/data-saham/daftar-saham",
-        "https://www.idx.id/en/listed-companies/company-profiles/",
+        "https://www.idx.id/id/perusahaan-tercatat/profil-perusahaan-tercatat/",
+        "https://block.idx.id/id/data-pasar/data-saham/daftar-saham/",
+        "https://www.idx.co.id/id/data-pasar/ringkasan-perdagangan/ringkasan-saham/",
     ]
     headers = {"User-Agent": "Mozilla/5.0 GPR-Market-Scanner/1.0"}
     found = []
@@ -368,14 +369,45 @@ def fetch_idx_universe():
         try:
             response = requests.get(url, timeout=20, headers=headers)
             response.raise_for_status()
-            # Some IDX pages render the company table server-side; pick up ticker-like cells.
-            found.extend(__import__("re").findall(r"(?<![A-Z0-9])([A-Z]{4})(?![A-Z0-9])", response.text.upper()))
+            # Parse table rows/columns only. Regex over the whole HTML wrongly counts
+            # unrelated four-letter words as tickers (the source of the inflated 1,404).
+            tables = pd.read_html(response.text)
+            for table in tables:
+                if table.empty:
+                    continue
+                cols = [str(c).strip().lower() for c in table.columns]
+                ticker_col = None
+                for i, col in enumerate(cols):
+                    if any(word in col for word in ("kode", "code", "ticker", "symbol")):
+                        ticker_col = i
+                        break
+                if ticker_col is None:
+                    # Some IDX tables have a generic first column containing ranking,
+                    # followed by the ticker code in the second column.
+                    for i in range(min(3, len(cols))):
+                        sample = table.iloc[:, i].astype(str).str.strip().str.upper()
+                        matches = sample.str.fullmatch(r"[A-Z]{4,5}").sum()
+                        if matches >= 5:
+                            ticker_col = i
+                            break
+                if ticker_col is None:
+                    continue
+                for value in table.iloc[:, ticker_col].astype(str):
+                    symbol = value.strip().upper()
+                    if symbol in {"KODE", "CODE", "TICKER", "SYMBOL", "NAN", "NONE"}:
+                        continue
+                    if __import__("re").fullmatch(r"[A-Z]{4,5}", symbol):
+                        found.append(symbol)
         except Exception:
             continue
-    found = [x for x in dict.fromkeys(found) if x not in {"HTTP", "HTML", "HTTPS", "DATA", "PAGE", "NULL", "TRUE", "FALSE"}]
-    if len(found) >= 500:
-        return found, "Daftar saham BEI diambil dari halaman publik IDX (refresh otomatis tiap 6 jam; tetap verifikasi simbol)"
-    return FALLBACK_CODES.copy(), "Fallback BEI bawaan aplikasi; IDX tidak mengirim daftar lengkap saat refresh terakhir"
+    found = list(dict.fromkeys(found))
+    # Accept live source only when it looks like a complete directory, not a single
+    # paginated table or a page whose HTML did not render the data.
+    if 800 <= len(found) <= 1200:
+        return found, f"Direktori tabel IDX terstruktur ({len(found)} kode unik; refresh tiap 6 jam)"
+    # Fallback is intentionally labeled; never pretend it is a complete current IDX list.
+    fallback = list(dict.fromkeys(FALLBACK_CODES))
+    return fallback, f"Fallback BEI ({len(fallback)} kode unik); direktori IDX lengkap gagal dimuat, daftar perlu diverifikasi"
 
 
 def get_universe(market: str):
@@ -419,11 +451,12 @@ with st.sidebar:
     timeframe = {"Harian":"1d", "1 jam":"1h", "15 menit":"15m", "5 menit":"5m"}[timeframe_label]
     horizon = st.selectbox("Horizon proyeksi (candle)", [3, 5, 10, 20], index=2)
     scan_size_label = st.selectbox("Target jumlah aset", ["50", "100", "300", "500", "Semua tersedia"], index=0)
-    batch_size = st.selectbox("Ukuran batch per klik", [10, 25, 50], index=1)
+    batch_size = st.selectbox("Ukuran batch manual", [100, 200, 300, 400, 500], index=0, help="Jumlah aset yang diproses setiap klik.")
+    auto_scan = st.checkbox("Otomatis scan sampai target", value=False, help="Jika aktif, tombol scan akan melanjutkan batch 100 aset demi 100 aset sampai target selesai.")
     min_score = st.slider("Skor minimum ranking", 40, 80, 80, 5)
     st.caption("Filter skor hanya memengaruhi ranking, bukan jumlah aset yang dianalisis.")
     start_new = st.button("↻ Mulai scan baru", use_container_width=True)
-    scan_next = st.button("▶ Scan batch berikutnya", type="primary", use_container_width=True)
+    scan_next = st.button("▶ Mulai / lanjutkan scan", type="primary", use_container_width=True)
 
 codes, universe_source = get_universe(market)
 target_count = len(codes) if scan_size_label == "Semua tersedia" else min(int(scan_size_label), len(codes))
@@ -447,32 +480,40 @@ left.metric("Aset tersedia", len(codes))
 mid.metric("Target scan", target_count)
 right.markdown(f"**Sumber data:** Yahoo Finance  \n<span class='note'>{universe_source}</span>", unsafe_allow_html=True)
 
-st.info("Universe diperbarui otomatis dari direktori publik bila sumber tersedia. Ketersediaan simbol di universe tidak menjamin Yahoo Finance memiliki candle yang cukup; gunakan batch untuk mengurangi risiko rate limit.")
+st.info("IDX diambil dari kolom kode saham pada tabel publik (bukan hasil pencarian teks seluruh halaman). Jika direktori lengkap gagal dimuat, aplikasi memakai daftar cadangan dan menandainya. Scan manual tersedia per 100/200/300/400/500 aset; mode otomatis melanjutkan per 100 sampai target, sehingga bisa berjalan lama dan terkena rate limit.")
 
 if scan_next:
     if state["cursor"] >= target_count:
         st.success("Target scan sudah selesai. Tekan 'Mulai scan baru' jika ingin mengulang.")
     else:
-        batch_start = state["cursor"]
-        stop = min(batch_start + batch_size, target_count)
-        progress = st.progress(0, text="Menyiapkan batch…")
+        # Manual mode processes the selected batch. Auto mode repeatedly processes
+        # batches of 100 until target is reached, preserving progress after each asset.
+        step_size = 100 if auto_scan else int(batch_size)
+        progress = st.progress(min(state["cursor"] / max(1, target_count), 1.0), text="Menyiapkan scan…")
         status = st.empty()
-        for idx in range(state["cursor"], stop):
-            code = codes[idx]
-            # Skip codes already completed in the current scan to preserve partial progress.
-            known = {x["code"] for x in state["results"]} | {x["code"] for x in state["errors"]}
-            if code not in known:
-                try:
-                    row = analyze_one(market, code, timeframe, int(horizon))
-                    state["results"].append(row)
-                except Exception as exc:
-                    state["errors"].append({"code":code, "error":str(exc)[:200]})
-            state["cursor"] = idx + 1
-            progress.progress((idx + 1 - batch_start) / max(1, stop - batch_start), text=f"Memproses {idx+1}/{target_count}: {code}")
-            status.info(f"Progres {state['cursor']}/{target_count} · berhasil {len(state['results'])} · gagal {len(state['errors'])}")
-            time.sleep(0.15)
-        state["results"].sort(key=lambda x:(x["score"],x["gpr_return_pct"]), reverse=True)
-        status.success(f"Batch selesai. Progres {state['cursor']}/{target_count} aset.")
+        while state["cursor"] < target_count:
+            batch_start = state["cursor"]
+            stop = min(batch_start + step_size, target_count)
+            for idx in range(batch_start, stop):
+                code = codes[idx]
+                known = {x["code"] for x in state["results"]} | {x["code"] for x in state["errors"]}
+                if code not in known:
+                    try:
+                        row = analyze_one(market, code, timeframe, int(horizon))
+                        state["results"].append(row)
+                    except Exception as exc:
+                        state["errors"].append({"code":code, "error":str(exc)[:200]})
+                state["cursor"] = idx + 1
+                progress.progress(state["cursor"] / max(1, target_count), text=f"Memproses {state['cursor']}/{target_count}: {code}")
+                status.info(f"Progres {state['cursor']}/{target_count} · berhasil {len(state['results'])} · gagal {len(state['errors'])}")
+                time.sleep(0.15)
+            state["results"].sort(key=lambda x:(x["score"],x["gpr_return_pct"]), reverse=True)
+            if not auto_scan:
+                break
+        if state["cursor"] >= target_count:
+            status.success(f"Scan selesai. Progres {state['cursor']}/{target_count} aset.")
+        else:
+            status.success(f"Batch selesai. Progres {state['cursor']}/{target_count} aset. Tekan lanjutkan untuk batch berikutnya.")
 
 results = state["results"]
 errors = state["errors"]
