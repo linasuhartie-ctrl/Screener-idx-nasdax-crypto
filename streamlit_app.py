@@ -2,6 +2,7 @@ import os
 import math
 import time
 from typing import Any
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import numpy as np
 import pandas as pd
@@ -13,6 +14,7 @@ st.set_page_config(page_title="GPR Market Scanner", page_icon="📈", layout="wi
 
 CACHE_SECONDS = int(os.getenv("CACHE_SECONDS", "300"))
 
+# Cleaned fallback codes without duplicates
 FALLBACK_CODES = """
 AADI AALI ABBA ABDA ABMM ACES ACRO ACST ADCP ADES ADHI ADMF ADMG ADMR ADRO
 AGAR AGII AIMS AISA AKKU AKPI AKRA AKSI ALDO ALKA ALMI ALTO AMAG AMAN AMAR
@@ -25,7 +27,7 @@ BKSW BLTA BLTZ BMAS BMRI BMTR BNBA BNGA BNII BNLI BOBA BOGA BOLA BOLT BRAM
 BREN BRIS BRMS BRNA BRPT BSDE BSIM BSSR BTEK BTEL BTON BTPN BTPS BUDI BULL
 BUMI BUVA BYAN CAMP CARE CASH CASS CBMF CBPE CCSI CEKA CENT CFIN CHEM CINT
 CITA CITY CLAY CLEO CMNP CMOA CMNT CPRO CPIN CPRI CSAP CSIS CTBN CTTH CTRA
-CTRA CUAN CYBR DADA DART DAYA DCII DEFI DEPO DEWA DGIK DGNS DGWG DILD DKFT
+CUAN CYBR DADA DART DAYA DCII DEFI DEPO DEWA DGIK DGNS DGWG DILD DKFT
 DMAS DMMX DMND DNAR DOID DPNS DPUM DRMA DSFI DSNG DSSA DUTI DVLA DWGL EAST
 ECII EDGE EKAD ELIT ELSA ELTY EMDE EMTK ENAK ENRG ENZO EPAC ERAA ERAL ESIP
 ESSA ESTI ETWA EURO EXCL FAPA FAST FILM FIRE FISH FITT FLMC FMII FOLK FOOD
@@ -41,26 +43,25 @@ KMTR KOBX KOIN KONI KOPI KPIG KREN KRYA LABA LAJU LAND LAPD LCAS LCKM LEAD
 LINK LMAS LMPI LOPI LPCK LPKR LPPF LRNA LSIP LTLS LUCY MAGP MAIN MAPA MAPB
 MAPI MARK MASA MASB MAYA MBAP MBSS MBTO MCAS MCOL MDIA MDKA MDKI MDLN MDRN
 MEDC MEGA MERK META MFMI MGNA MGRO MICE MIDI MIKA MINA MIRA MITI MKNT MKPI
-MLBI MLIA MLPL MLPT MLPT MLPT MMIX MMLP MMSI MNCN MPPA MPMX MREI MSIN MTDL
-MTEL MTLA MTMH MTPS MTRA MTWI MULT MYOH MYOR MYTX NASI NATO NELY NEST NETV
-NICL NIKL NIPS NISP NOBU NRCA NSSS NUSA OASA OBMD OCAP OKAS OMRE OPMS PADI
-PALM PAMG PANI PANR PANS PBID PBRX PBSA PCAR PDES PEGE PEHA PGAS PGEO PGLI
-PGUN PICO PJAA PKPK PLAN PLIN PMJS PMMP PMUI PNBN PNBS PNGO PNIN PNSE POLI
-POLL POLU PORT POWR PPRE PPRO PRDA PRIM PSAB PSAT PSDN PSKT PTPP PUDP PURA
-PURE PWON PYFA RAJA RALS RANC RBMS RDTX REAL RELI RICY RIGS RISE RMBA RMKE
-ROCK RODA ROTI RUIS RUNS SAFE SAME SAMF SAPX SATU SBAT SBCS SBMA SCCO SCMA
-SCNP SDMU SDPC SDRA SGRO SHID SHIP SICO SIDO SILO SIMA SIMP SIPD SKBM SKLT
-SKRN SLIS SMAR SMBR SMCB SMDM SMDR SMGA SMGR SMIL SMKL SMKM SMMT SMRA SMSM
-SNLK SOCI SOFA SOHO SOSS SOTS SPMA SPTO SQMI SRAJ SRTG SSIA SSMS SSTM STAR
-STTP SUNI SUPR SURE SWAT SWID TALF TAMU TBIG TBLA TBMS TCID TCPI TDPM TELE
-TFAS TGKA TGRA TIFA TINS TIRA TKIM TLKM TLDN TMAS TMPO TNCA TOBA TOPS TOTL
-TOTO TOWR TPIA TPMA TRGU TRIL TRIM TRIN TRIO TRIS TRJA TRON TRUE TSCP TUGU
-TYRE UANG UCID ULTJ UNIC UNIT UNTR UNVR VICI VINS VKTR VRNA WAPO WEGE WEHA
-WIFI WIKA WINR WINS WIRG WMPP WMUU WTON YPAS ZATA ZBRA ZINC ZONE
+MLBI MLIA MLPL MLPT MMIX MMLP MMSI MNCN MPPA MPMX MREI MSIN MTDL MTEL MTLA
+MTMH MTPS MTRA MTWI MULT MYOH MYOR MYTX NASI NATO NELY NEST NETV NICL NIKL
+NIPS NISP NOBU NRCA NSSS NUSA OASA OBMD OCAP OKAS OMRE OPMS PADI PALM PAMG
+PANI PANR PANS PBID PBRX PBSA PCAR PDES PEGE PEHA PGAS PGEO PGLI PGUN PICO
+PJAA PKPK PLAN PLIN PMJS PMMP PMUI PNBN PNBS PNGO PNIN PNSE POLI POLL POLU
+PORT POWR PPRE PPRO PRDA PRIM PSAB PSAT PSDN PSKT PTPP PUDP PURA PURE PWON
+PYFA RAJA RALS RANC RBMS RDTX REAL RELI RICY RIGS RISE RMBA RMKE ROCK RODA
+ROTI RUIS RUNS SAFE SAME SAMF SAPX SATU SBAT SBCS SBMA SCCO SCMA SCNP SDMU
+SDPC SDRA SGRO SHID SHIP SICO SIDO SILO SIMA SIMP SIPD SKBM SKLT SKRN SLIS
+SMAR SMBR SMCB SMDM SMDR SMGA SMGR SMIL SMKL SMKM SMMT SMRA SMSM SNLK SOCI
+SOFA SOHO SOSS SOTS SPMA SPTO SQMI SRAJ SRTG SSIA SSMS SSTM STAR STTP SUNI
+SUPR SURE SWAT SWID TALF TAMU TBIG TBLA TBMS TCID TCPI TDPM TELE TFAS TGKA
+TGRA TIFA TINS TIRA TKIM TLKM TLDN TMAS TMPO TNCA TOBA TOPS TOTL TOTO TOWR
+TPIA TPMA TRGU TRIL TRIM TRIN TRIO TRIS TRJA TRON TRUE TSCP TUGU TYRE UANG
+UCID ULTJ UNIC UNIT UNTR UNVR VICI VINS VKTR VRNA WAPO WEGE WEHA WIFI WIKA
+WINR WINS WIRG WMPP WMUU WTON YPAS ZATA ZBRA ZINC ZONE
 """.split()
 FALLBACK_CODES = list(dict.fromkeys(FALLBACK_CODES))
 
-# Curated universes: convenient starting lists, not a claim of complete live listings.
 US_CODES = """
 AAPL MSFT NVDA AMZN GOOGL META AVGO TSLA BRK-B JPM WMT LLY V MA XOM ORCL COST NFLX JNJ HD PG ABBV BAC KO CRM CVX AMD TMUS MRK WFC CSCO ACN IBM MCD LIN ABT GE NOW PEP TMO DIS QCOM TXN CAT AMGN INTU DHR VZ PM RTX UNH COP GS SPGI ISRG AMAT BKNG LOW PFE C SCHW BLK ANET MU LRCX ADI SYK PANW KLAC HON DE CAT UBER NKE PLTR ARM SHOP SNOW CRWD DDOG NET COIN HOOD SQ PYPL TGT F GM FDX UPS BA INTC CMCSA T RBLX ABNB DASH MAR ROST CHTR MDT BMY GILD CVS ELV CI REGN ZTS SO DUK NEE CEG FSLR ENPH OXY SLB HAL EOG PSX MPC VLO KMI OKE PBR BABA BIDU JD PDD TSM ASML SAP SONY TM HMC NVO AZN SHEL RIO BHP VALE
 """.split()
@@ -77,7 +78,6 @@ def normalize_yf_history(raw: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame()
     df = raw.copy()
     if isinstance(df.columns, pd.MultiIndex):
-        # Single-symbol history should be flattened, but tolerate yfinance's multi-index output.
         df.columns = [str(col[0]) if isinstance(col, tuple) else str(col) for col in df.columns]
     df = df.reset_index()
     aliases = {"Date": "time", "Datetime": "time", "Open": "open", "High": "high", "Low": "low", "Close": "close", "Volume": "volume"}
@@ -127,12 +127,10 @@ def matern32_kernel(x, z, amplitude, scale):
 
 
 def pine_rma(values, length):
-    """TradingView ta.rma-style Wilder average: SMA seed, then recursive update."""
     values = np.asarray(values, dtype=float)
     out = np.full(len(values), np.nan, dtype=float)
     if length <= 0 or len(values) < length:
         return out
-    # Pine RMA seeds from the first length non-NaN observations.
     valid_idx = np.flatnonzero(np.isfinite(values))
     if len(valid_idx) < length:
         return out
@@ -144,7 +142,6 @@ def pine_rma(values, length):
         if np.isfinite(values[i]):
             prev = out[i - 1]
             if not np.isfinite(prev):
-                # If a gap exists, restart from the next full seed window.
                 prior = values[max(0, i-length+1):i+1]
                 if np.isfinite(prior).sum() == length:
                     out[i] = float(np.mean(prior))
@@ -154,14 +151,12 @@ def pine_rma(values, length):
 
 
 def gpr_profile(timeframe):
-    """Parameter profile translated from the user's Pine Script timeframe rules."""
     if timeframe in ("5m", "15m"):
         return dict(training=30, momentum_len=6, vol_len=24, ema_fast=8, ema_slow=26,
                     kernel_scale=1.8, noise_ratio=0.85, volume_fade=0.35)
     if timeframe == "1h":
         return dict(training=35, momentum_len=5, vol_len=20, ema_fast=8, ema_slow=21,
                     kernel_scale=1.6, noise_ratio=0.65, volume_fade=0.50)
-    # Daily profile from Pine: n=30, mom=5, vol=14, EMA 8/21, scale 1.5, noise .30, fade .65.
     return dict(training=30, momentum_len=5, vol_len=14, ema_fast=8, ema_slow=21,
                 kernel_scale=1.5, noise_ratio=0.30, volume_fade=0.65)
 
@@ -169,7 +164,6 @@ def gpr_profile(timeframe):
 def gpr_project(df, horizon=10, training=30, momentum_len=5, vol_len=14,
                 ema_fast=8, ema_slow=21, kernel_scale=1.5, noise_ratio=0.30,
                 volume_fade=0.65, band_mode="Pita GPR", band_sigma=1.96, atr_width=0.70):
-    """GPR forecast ported to match the supplied Pine Script as closely as possible."""
     min_needed = max(training + vol_len + ema_slow + 10, 60)
     if len(df) < min_needed:
         raise ValueError(f"Data candle hanya {len(df)}; perlu minimal sekitar {min_needed}.")
@@ -181,12 +175,9 @@ def gpr_project(df, horizon=10, training=30, momentum_len=5, vol_len=14,
     logret = np.full(len(close), np.nan)
     logret[1:] = np.log(np.maximum(close[1:], 1e-12) / np.maximum(close[:-1], 1e-12))
     ret_series = pd.Series(logret)
-    # Pine ta.ema(ret, pMom); pandas ewm uses the same recursive EMA convention.
     momentum = ret_series.ewm(span=momentum_len, adjust=False, min_periods=1).mean().to_numpy()
-    # Pine ta.stdev() defaults to biased=true (population standard deviation).
     volatility = ret_series.rolling(vol_len, min_periods=vol_len).std(ddof=0).to_numpy()
     vol_base = pd.Series(volatility).rolling(training, min_periods=training).mean().to_numpy()
-    # Pine ta.sma(volume, pVol) is unavailable until a full window exists.
     avg_volume = pd.Series(volume).rolling(vol_len, min_periods=vol_len).mean().to_numpy()
     rel_volume = np.zeros(len(close))
     valid = (volume > 0) & (avg_volume > 0) & np.isfinite(avg_volume)
@@ -198,7 +189,6 @@ def gpr_project(df, horizon=10, training=30, momentum_len=5, vol_len=14,
     prev_close = np.r_[np.nan, close[:-1]]
     tr = np.maximum(high - low, np.maximum(np.abs(high - prev_close), np.abs(low - prev_close)))
     tr[0] = high[0] - low[0]
-    # TradingView ta.atr() = ta.rma(true range, length), including SMA seed.
     atr = pine_rma(tr, vol_len)
 
     idx = len(df) - 1
@@ -207,7 +197,6 @@ def gpr_project(df, horizon=10, training=30, momentum_len=5, vol_len=14,
         raise ValueError("Indikator belum siap pada candle terakhir.")
 
     X, y = [], []
-    # Same chronology and feature lag as Pine: target ret[lag], features at lag+1.
     for r in range(training):
         target_idx = idx - training + 1 + r
         feature_idx = target_idx - 1
@@ -236,11 +225,20 @@ def gpr_project(df, horizon=10, training=30, momentum_len=5, vol_len=14,
             if i == j:
                 value += noise_var
             K[i, j] = K[j, i] = value
+
+    # Jitter penstabil numerik matriks kovarian
+    K += np.eye(n) * 1e-6
+
     try:
         L = np.linalg.cholesky(K)
         alpha = np.linalg.solve(L.T, np.linalg.solve(L, y))
     except np.linalg.LinAlgError:
-        raise ValueError("Matriks GPR tidak stabil.")
+        try:
+            K += np.eye(n) * 1e-4
+            L = np.linalg.cholesky(K)
+            alpha = np.linalg.solve(L.T, np.linalg.solve(L, y))
+        except np.linalg.LinAlgError:
+            raise ValueError("Matriks GPR tidak stabil secara numerik.")
 
     price_start = float(close[idx])
     price_prev = price_start
@@ -267,7 +265,6 @@ def gpr_project(df, horizon=10, training=30, momentum_len=5, vol_len=14,
         pred_ret = float(kstar @ alpha)
         try:
             solved = np.linalg.solve(L, kstar)
-            # Pine: max(amp + noise - dot(solved, solved), 1e-12).
             predictive_variance = max(float(signal_var + noise_var - solved @ solved), 1e-12)
         except (np.linalg.LinAlgError, ValueError):
             predictive_variance = 1e-12
@@ -280,7 +277,6 @@ def gpr_project(df, horizon=10, training=30, momentum_len=5, vol_len=14,
             upper = price_pred + distance
             lower = max(1e-12, price_pred - distance)
         else:
-            # Pine's default "Pita GPR": multiplicative log-return uncertainty band.
             upper = price_pred * math.exp(band_sigma * sigma_cum)
             lower = price_pred * math.exp(-band_sigma * sigma_cum)
         predictions.append({
@@ -333,7 +329,6 @@ def gpr_project(df, horizon=10, training=30, momentum_len=5, vol_len=14,
     }
 
 
-
 def analyze_one(market: str, code: str, timeframe: str, horizon: int) -> dict:
     hist = get_history_cached(market, code, timeframe, int(time.time() // CACHE_SECONDS))
     if hist.empty:
@@ -355,14 +350,12 @@ def analyze_one(market: str, code: str, timeframe: str, horizon: int) -> dict:
 
 @st.cache_data(ttl=6 * 60 * 60, show_spinner=False)
 def fetch_us_universe():
-    """Fetch US-listed common-equity symbols and exclude non-common instruments."""
     urls = [
         "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt",
         "https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt",
     ]
     symbols = []
     headers = {"User-Agent": "Mozilla/5.0 GPR-Market-Scanner/1.0"}
-    # Explicit instrument markers, rather than treating every directory row as a stock.
     non_common = (
         " exchange traded fund", " etf", " fund", " warrant", " rights", " right",
         " units", " unit", " preferred stock", " preferred shares", " depositary share",
@@ -401,10 +394,8 @@ def fetch_us_universe():
                 continue
             if any(marker in name for marker in non_common):
                 continue
-            # Only symbols that Yahoo Finance can represent reliably are retained.
             if not all(c.isalnum() or c in ".-^" for c in symbol):
                 continue
-            # Some exchange directory symbols are class shares; Yahoo uses hyphens.
             symbols.append(symbol.replace(".", "-"))
     symbols = list(dict.fromkeys(symbols))
     if len(symbols) < 1000:
@@ -414,11 +405,9 @@ def fetch_us_universe():
 
 @st.cache_data(ttl=6 * 60 * 60, show_spinner=False)
 def fetch_crypto_universe():
-    """Fetch Yahoo Finance's current all-cryptocurrencies screener universe."""
     symbols = []
     headers = {"User-Agent": "Mozilla/5.0 GPR-Market-Scanner/1.0"}
     url = "https://query1.finance.yahoo.com/v1/finance/screener/predefined/saved"
-    # Yahoo's screener returns up to 250 results per request; paginate until exhausted.
     for offset in range(0, 10000, 250):
         params = {"formatted": "false", "count": 250, "start": offset, "scrIds": "all_cryptocurrencies_us"}
         response = requests.get(url, params=params, timeout=20, headers=headers)
@@ -441,7 +430,6 @@ def fetch_crypto_universe():
 
 @st.cache_data(ttl=6 * 60 * 60, show_spinner=False)
 def fetch_idx_universe():
-    """Fetch all listed IDX company codes from the IDX DataTables JSON endpoint."""
     url = "https://www.idx.co.id/primary/ListedCompany/GetCompanyProfiles"
     params = {"start": 0, "length": 9999, "code": ""}
     headers = {
@@ -451,8 +439,6 @@ def fetch_idx_universe():
     }
     payload = None
     errors = []
-    # IDX sometimes blocks the standard requests TLS fingerprint. Try browser-like
-    # TLS via curl_cffi when available, then use requests as a fallback.
     try:
         from curl_cffi import requests as curl_requests
         response = curl_requests.get(url, params=params, headers=headers, impersonate="chrome", timeout=30)
@@ -479,15 +465,12 @@ def fetch_idx_universe():
             if __import__("re").fullmatch(r"[A-Z0-9]{4,5}", symbol):
                 found.append(symbol)
         found = list(dict.fromkeys(found))
-        # Only call it complete if the API returned all rows it says exist.
         if total >= 800 and len(found) >= min(total, 800) and len(found) >= total * 0.90:
             return found, f"API direktori resmi IDX ({len(found)}/{total} kode; cache 6 jam)"
         errors.append(f"API hanya mengembalikan {len(found)} dari {total} data")
-    # Fallback is intentionally explicit; never report it as the complete IDX universe.
     fallback = list(dict.fromkeys(FALLBACK_CODES))
     reason = "; ".join(errors) if errors else "format respons IDX tidak sesuai"
     return fallback, f"FALLBACK BEI ({len(fallback)} kode) — direktori resmi gagal dimuat ({reason}); universe tidak lengkap"
-
 
 
 def get_universe(market: str):
@@ -541,7 +524,6 @@ with st.sidebar:
 codes, universe_source = get_universe(market)
 target_count = len(codes) if scan_size_label == "Semua tersedia" else min(int(scan_size_label), len(codes))
 
-# Store scan state separately per market/timeframe so changing market doesn't mix results.
 state_key = f"{market}_{timeframe}_{horizon}"
 if "scanner_states" not in st.session_state:
     st.session_state.scanner_states = {}
@@ -552,7 +534,7 @@ if start_new:
     state = {"cursor":0, "results":[], "errors":[], "target":target_count, "source":universe_source}
     st.session_state.scanner_states[state_key] = state
     st.rerun()
-# Respect the latest target selection while preserving progress.
+
 state["target"] = target_count
 
 left, mid, right = st.columns([1.2, 1.2, 2.2])
@@ -560,36 +542,54 @@ left.metric("Aset tersedia", len(codes))
 mid.metric("Target scan", target_count)
 right.markdown(f"**Sumber data:** Yahoo Finance  \n<span class='note'>{universe_source}</span>", unsafe_allow_html=True)
 
-st.info("Universe IDX memakai endpoint direktori perusahaan tercatat BEI dengan pagination panjang. Jika sumber resmi diblokir atau respons tidak lengkap, aplikasi menandai penggunaan fallback dan tidak mengklaim daftar itu lengkap. Universe AS mengecualikan banyak instrumen non-saham (ETF, warrant, unit, preferred, notes, dan sejenisnya). Scan manual tersedia per 100/200/300/400/500 aset; mode otomatis melanjutkan per 100 sampai target.")
+st.info("Universe IDX memakai endpoint direktori perusahaan tercatat BEI. Scan dijalankan secara multi-threaded (parallel) untuk kecepatan maksimal tanpa mengorbankan kestabilan.")
+
+# Task helper function untuk Multi-threading
+def _worker_task(code):
+    time.sleep(0.05)
+    try:
+        row = analyze_one(market, code, timeframe, int(horizon))
+        return "SUCCESS", code, row
+    except Exception as exc:
+        return "ERROR", code, str(exc)[:200]
 
 if scan_next:
     if state["cursor"] >= target_count:
         st.success("Target scan sudah selesai. Tekan 'Mulai scan baru' jika ingin mengulang.")
     else:
-        # Manual mode processes the selected batch. Auto mode repeatedly processes
-        # batches of 100 until target is reached, preserving progress after each asset.
         step_size = 100 if auto_scan else int(batch_size)
-        progress = st.progress(min(state["cursor"] / max(1, target_count), 1.0), text="Menyiapkan scan…")
+        progress = st.progress(min(state["cursor"] / max(1, target_count), 1.0), text="Menyiapkan multi-threaded scan…")
         status = st.empty()
+
         while state["cursor"] < target_count:
             batch_start = state["cursor"]
             stop = min(batch_start + step_size, target_count)
-            for idx in range(batch_start, stop):
-                code = codes[idx]
-                known = {x["code"] for x in state["results"]} | {x["code"] for x in state["errors"]}
-                if code not in known:
-                    try:
-                        row = analyze_one(market, code, timeframe, int(horizon))
-                        state["results"].append(row)
-                    except Exception as exc:
-                        state["errors"].append({"code":code, "error":str(exc)[:200]})
-                state["cursor"] = idx + 1
-                progress.progress(state["cursor"] / max(1, target_count), text=f"Memproses {state['cursor']}/{target_count}: {code}")
-                status.info(f"Progres {state['cursor']}/{target_count} · berhasil {len(state['results'])} · gagal {len(state['errors'])}")
-                time.sleep(0.15)
-            state["results"].sort(key=lambda x:(x["score"],x["gpr_return_pct"]), reverse=True)
+            batch_codes = codes[batch_start:stop]
+            
+            known = {x["code"] for x in state["results"]} | {x["code"] for x in state["errors"]}
+            to_process = [c for c in batch_codes if c not in known]
+
+            if to_process:
+                with ThreadPoolExecutor(max_workers=8) as executor:
+                    futures = {executor.submit(_worker_task, code): code for code in to_process}
+                    for future in as_completed(futures):
+                        status_type, code, payload = future.result()
+                        if status_type == "SUCCESS":
+                            state["results"].append(payload)
+                        else:
+                            state["errors"].append({"code": code, "error": payload})
+                        
+                        state["cursor"] += 1
+                        current_c = min(state["cursor"], target_count)
+                        progress.progress(current_c / max(1, target_count), text=f"Memproses {current_c}/{target_count}: {code}")
+                        status.info(f"Progres {current_c}/{target_count} · berhasil {len(state['results'])} · gagal {len(state['errors'])}")
+            else:
+                state["cursor"] = stop
+
+            state["results"].sort(key=lambda x: (x["score"], x["gpr_return_pct"]), reverse=True)
             if not auto_scan:
                 break
+
         if state["cursor"] >= target_count:
             status.success(f"Scan selesai. Progres {state['cursor']}/{target_count} aset.")
         else:
@@ -597,11 +597,11 @@ if scan_next:
 
 results = state["results"]
 errors = state["errors"]
-qualified = [x for x in results if float(x.get("score",0)) >= min_score]
+qualified = [x for x in results if float(x.get("score", 0)) >= min_score]
 candidates = [x for x in qualified if x.get("signal") == "KANDIDAT"]
 best_return = max((float(x["gpr_return_pct"]) for x in qualified), default=None)
 
-m1,m2,m3,m4 = st.columns(4)
+m1, m2, m3, m4 = st.columns(4)
 m1.metric("Berhasil dianalisis", len(results))
 m2.metric("Lolos skor", len(qualified))
 m3.metric("Kandidat", len(candidates))
@@ -611,47 +611,49 @@ rank_tab, detail_tab, status_tab = st.tabs(["🏆 Ranking", "📈 Detail aset", 
 with rank_tab:
     query = st.text_input("Cari simbol", placeholder="Contoh: BBCA, AAPL, BTC-USD")
     view = [x for x in qualified if query.strip().upper() in x["code"].upper()]
-    view.sort(key=lambda x:(x["score"],x["gpr_return_pct"]), reverse=True)
+    view.sort(key=lambda x: (x["score"], x["gpr_return_pct"]), reverse=True)
     if view:
         table = []
-        for rank, item in enumerate(view,1):
+        for rank, item in enumerate(view, 1):
             score = float(item["score"])
             table.append({
-                "Rank":rank, "Pasar":item["market"], "Kode":item["code"],
-                "Kategori":"HIGH" if score>=80 else "MEDIUM–HIGH" if score>=60 else "MEDIUM",
-                "Skor":score, "GPR Return (%)":item["gpr_return_pct"],
-                "Uncertainty (%)":item.get("uncertainty_pct", np.nan),
-                "Tren":item["trend"], "Momentum":item["momentum"],
-                "Rel. Volume":item["relative_volume"], "Sinyal":item["signal"], "Harga":item["price"]
+                "Rank": rank, "Pasar": item["market"], "Kode": item["code"],
+                "Kategori": "HIGH" if score >= 80 else "MEDIUM–HIGH" if score >= 60 else "MEDIUM",
+                "Skor": score, "GPR Return (%)": item["gpr_return_pct"],
+                "Uncertainty (%)": item.get("uncertainty_pct", np.nan),
+                "Tren": item["trend"], "Momentum": item["momentum"],
+                "Rel. Volume": item["relative_volume"], "Sinyal": item["signal"], "Harga": item["price"]
             })
         table_df = pd.DataFrame(table)
         st.dataframe(table_df, use_container_width=True, hide_index=True)
         st.download_button("⬇️ Unduh ranking CSV", table_df.to_csv(index=False).encode("utf-8"), file_name=f"gpr_ranking_{market.lower()}.csv", mime="text/csv")
     else:
         st.info("Belum ada aset yang lolos skor. Jalankan batch atau turunkan skor minimum.")
+
 with detail_tab:
     if results:
         codes_ready = [x["code"] for x in results]
         selected = st.selectbox("Pilih aset", codes_ready)
         item = next(x for x in results if x["code"] == selected)
-        a,b,c,d = st.columns(4)
+        a, b, c, d = st.columns(4)
         a.metric("Harga terakhir", f"{item['price']:,.4f}")
         b.metric("Tren", item["trend"])
         c.metric("GPR Return", f"{item['gpr_return_pct']:+.2f}%")
         d.metric("Uncertainty", f"{item.get('uncertainty_pct', float('nan')):.2f}%")
-        preds = item.get("predictions",[])
+        preds = item.get("predictions", [])
         if preds:
-            chart = pd.DataFrame({"Candle":["Sekarang"]+[f"+{p['step']}" for p in preds], "Harga":[item["price"]]+[p["price"] for p in preds]}).set_index("Candle")
+            chart = pd.DataFrame({"Candle": ["Sekarang"] + [f"+{p['step']}" for p in preds], "Harga": [item["price"]] + [p["price"] for p in preds]}).set_index("Candle")
             st.line_chart(chart)
             st.dataframe(pd.DataFrame(preds), use_container_width=True, hide_index=True)
     else:
         st.info("Scan batch pertama untuk melihat detail aset.")
+
 with status_tab:
     st.write(f"**Pasar:** {market}")
     st.write(f"**Provider:** Yahoo Finance via yfinance")
     st.write(f"**Universe:** {universe_source}")
     st.write(f"**Progres:** {state['cursor']} / {target_count}")
-    st.write(f"**Berhasil:** {len(results)} · **Gagal:** {len(errors)} · **Belum diproses:** {max(0,target_count-state['cursor'])}")
+    st.write(f"**Berhasil:** {len(results)} · **Gagal:** {len(errors)} · **Belum diproses:** {max(0, target_count - state['cursor'])}")
     if errors:
         error_df = pd.DataFrame(errors)
         error_df["jenis_error"] = error_df["error"].apply(lambda e: "Data kosong/tidak tersedia" if "kosong" in str(e).lower() else "Data candle kurang" if "minimal" in str(e).lower() else "Rate limit/koneksi" if "429" in str(e) or "timeout" in str(e).lower() or "too many" in str(e).lower() else "Error lainnya")
