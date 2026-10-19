@@ -163,10 +163,15 @@ def gpr_profile(timeframe):
 
 def gpr_project(df, horizon=10, training=30, momentum_len=5, vol_len=14,
                 ema_fast=8, ema_slow=21, kernel_scale=1.5, noise_ratio=0.30,
-                volume_fade=0.65, band_mode="Pita GPR", band_sigma=1.96, atr_width=0.70):
+                volume_fade=0.65, band_mode="Pita GPR", band_sigma=1.96, atr_width=0.70,
+                validation_candles=3):
+    
     min_needed = max(training + vol_len + ema_slow + 10, 60)
-    if len(df) < min_needed:
-        raise ValueError(f"Data candle hanya {len(df)}; perlu minimal sekitar {min_needed}.")
+    idx = len(df) - 1 - validation_candles 
+    
+    if idx < min_needed:
+        raise ValueError(f"Data candle hanya {len(df)}; perlu minimal {min_needed + validation_candles}.")
+        
     close = df["close"].astype(float).to_numpy()
     volume = df["volume"].fillna(0).astype(float).to_numpy()
     high = df["high"].astype(float).to_numpy()
@@ -191,7 +196,6 @@ def gpr_project(df, horizon=10, training=30, momentum_len=5, vol_len=14,
     tr[0] = high[0] - low[0]
     atr = pine_rma(tr, vol_len)
 
-    idx = len(df) - 1
     vol_ref = max(float(vol_base[idx]) if np.isfinite(vol_base[idx]) else 0.0, 0.0001)
     if not np.isfinite(volatility[idx]) or not np.isfinite(atr[idx]) or not np.isfinite(logret[idx]):
         raise ValueError("Indikator belum siap pada candle terakhir.")
@@ -213,9 +217,7 @@ def gpr_project(df, horizon=10, training=30, momentum_len=5, vol_len=14,
 
     X, y = np.asarray(X, dtype=float), np.asarray(y, dtype=float)
     n = len(y)
-    if n < max(20, training - 3):
-        raise ValueError("Observasi training valid terlalu sedikit.")
-
+    
     signal_var = max(float(np.mean(y*y)), 1e-8)
     noise_var = signal_var * noise_ratio + 1e-10
     K = np.empty((n, n), dtype=float)
@@ -226,9 +228,7 @@ def gpr_project(df, horizon=10, training=30, momentum_len=5, vol_len=14,
                 value += noise_var
             K[i, j] = K[j, i] = value
 
-    # Jitter penstabil numerik matriks kovarian
     K += np.eye(n) * 1e-6
-
     try:
         L = np.linalg.cholesky(K)
         alpha = np.linalg.solve(L.T, np.linalg.solve(L, y))
@@ -251,7 +251,9 @@ def gpr_project(df, horizon=10, training=30, momentum_len=5, vol_len=14,
     cumulative_variance = 0.0
     predictions = []
 
-    for h in range(horizon):
+    total_steps = horizon + validation_candles 
+
+    for h in range(total_steps):
         fade = volume_fade ** h
         assumed_vol = vol_ref + (vol_prev - vol_ref) * fade
         x_star = np.array([
@@ -268,10 +270,12 @@ def gpr_project(df, horizon=10, training=30, momentum_len=5, vol_len=14,
             predictive_variance = max(float(signal_var + noise_var - solved @ solved), 1e-12)
         except (np.linalg.LinAlgError, ValueError):
             predictive_variance = 1e-12
+            
         cumulative_variance += predictive_variance
         cumulative_return += pred_ret
         price_pred = price_start * math.exp(cumulative_return)
         sigma_cum = math.sqrt(max(cumulative_variance, 0.0))
+        
         if band_mode == "Kanal ATR":
             distance = atr_width * float(atr[idx]) * math.sqrt(h + 1.0)
             upper = price_pred + distance
@@ -279,10 +283,15 @@ def gpr_project(df, horizon=10, training=30, momentum_len=5, vol_len=14,
         else:
             upper = price_pred * math.exp(band_sigma * sigma_cum)
             lower = price_pred * math.exp(-band_sigma * sigma_cum)
+            
+        real_idx = idx + h + 1
+        actual_price = float(close[real_idx]) if real_idx < len(df) else None
+
         predictions.append({
             "step": h + 1,
+            "is_future": actual_price is None,
             "price": round(price_pred, 6),
-            "return_pct": round((price_pred / price_start - 1.0) * 100.0, 3),
+            "actual_price": round(actual_price, 6) if actual_price is not None else None,
             "upper": round(upper, 6),
             "lower": round(lower, 6),
             "sigma_cum": sigma_cum,
@@ -296,55 +305,75 @@ def gpr_project(df, horizon=10, training=30, momentum_len=5, vol_len=14,
         fast_prev = a_f * price_pred + (1.0-a_f) * fast_prev
         slow_prev = a_s * price_pred + (1.0-a_s) * slow_prev
 
-    latest_price = float(close[idx])
-    trend = "BULLISH" if fast[idx] > slow[idx] else "BEARISH"
-    mom_now = float(momentum[idx]) if np.isfinite(momentum[idx]) else 0.0
-    vol_now = float(volume[idx])
-    vol_avg = float(avg_volume[idx]) if np.isfinite(avg_volume[idx]) else 0.0
+    latest_actual_price = float(close[-1])
+    trend = "BULLISH" if fast[-1] > slow[-1] else "BEARISH"
+    mom_now = float(momentum[-1]) if np.isfinite(momentum[-1]) else 0.0
+    vol_now = float(volume[-1])
+    vol_avg = float(avg_volume[-1]) if np.isfinite(avg_volume[-1]) else 0.0
     rel_vol = vol_now / vol_avg if vol_avg > 0 else 0.0
+    
     final = predictions[-1]
     sigma_cum_final = math.sqrt(max(cumulative_variance, 0.0))
     uncertainty = 100.0 * sigma_cum_final / (abs(cumulative_return) + sigma_cum_final + 1e-10)
+    
+    # Validation Logic
+    validation_errors = []
+    hits = 0
+    for p in predictions:
+        if not p["is_future"] and p["actual_price"] is not None:
+            err = abs(p["price"] - p["actual_price"]) / max(p["actual_price"], 1e-12)
+            validation_errors.append(err)
+            if p["lower"] <= p["actual_price"] <= p["upper"]:
+                hits += 1
+                
+    val_count = len(validation_errors)
+    validation_mape = (sum(validation_errors) / val_count) if val_count > 0 else 1.0
+    validation_hit_rate = (hits / val_count) if val_count > 0 else 0.0
+
+    return_from_now = (final["price"] / latest_actual_price - 1.0) * 100.0
 
     return {
-        "price": round(latest_price, 6),
+        "price": round(latest_actual_price, 6),
+        "projection_start_price": round(price_start, 6),
         "trend": trend,
         "momentum": "POSITIVE" if mom_now > 0 else "NEGATIVE",
         "relative_volume": round(rel_vol, 2),
-        "gpr_return_pct": final["return_pct"],
+        "gpr_return_pct": round(return_from_now, 3),
         "uncertainty_pct": round(uncertainty, 2),
-        "cumulative_return_log": cumulative_return,
         "cumulative_sigma": sigma_cum_final,
         "projected_price": final["price"],
-        "upper": final["upper"],
-        "lower": final["lower"],
         "horizon": horizon,
+        "validation_mape": validation_mape,
+        "validation_hit_rate": validation_hit_rate,
         "predictions": predictions,
-        "as_of": str(df.iloc[idx].get("time", "")),
-        "bars": len(df),
-        "model_parameters": {"training": training, "momentum_len": momentum_len, "vol_len": vol_len,
-                             "ema_fast": ema_fast, "ema_slow": ema_slow, "kernel_scale": kernel_scale,
-                             "noise_ratio": noise_ratio, "volume_fade": volume_fade,
-                             "band_mode": band_mode, "band_sigma": band_sigma},
     }
-
 
 def analyze_one(market: str, code: str, timeframe: str, horizon: int) -> dict:
     hist = get_history_cached(market, code, timeframe, int(time.time() // CACHE_SECONDS))
     if hist.empty:
         raise ValueError("Data historis kosong/tidak tersedia dari Yahoo Finance.")
+        
     params = gpr_profile(timeframe)
-    result = gpr_project(hist, horizon=horizon, **params)
+    result = gpr_project(hist, horizon=horizon, validation_candles=3, **params)
     result["code"] = code
     result["market"] = market
-    score = max(0, min(100,
-        35 * (1 if result["trend"] == "BULLISH" else 0)
-        + 20 * (1 if result["momentum"] == "POSITIVE" else 0)
-        + 20 * min(result["relative_volume"] / 2.0, 1.0)
-        + 25 * max(0, min(result["gpr_return_pct"] / 5.0, 1.0))
-    ))
+    
+    hit_score = result["validation_hit_rate"] * 30
+    mape_score = max(0, 20 - (result["validation_mape"] * 100 * 4))
+    trend_score = 15 if result["trend"] == "BULLISH" else 0
+    mom_score = 10 if result["momentum"] == "POSITIVE" else 0
+    ret_score = 25 * max(0, min(result["gpr_return_pct"] / 5.0, 1.0))
+    
+    score = max(0, min(100, hit_score + mape_score + trend_score + mom_score + ret_score))
     result["score"] = round(score, 1)
-    result["signal"] = ("KANDIDAT" if result["trend"] == "BULLISH" and result["momentum"] == "POSITIVE" and result["gpr_return_pct"] > 0 else "PANTAU" if result["gpr_return_pct"] > 0 else "HINDARI")
+    
+    if result["trend"] == "BULLISH" and result["gpr_return_pct"] > 0 and result["validation_hit_rate"] >= 0.66:
+        result["signal"] = "KANDIDAT"
+    elif result["gpr_return_pct"] > 0:
+        result["signal"] = "PANTAU"
+    else:
+        result["signal"] = "HINDARI"
+        
     return result
 
 
@@ -505,7 +534,7 @@ div.stButton > button {border-radius:10px; min-height:42px; font-weight:600;}
 """, unsafe_allow_html=True)
 
 st.title("📈 GPR MARKET SCANNER")
-st.caption("Satu dashboard untuk saham BEI, saham Amerika, dan aset kripto")
+st.caption("Satu dashboard untuk saham BEI, saham Amerika, dan aset kripto dengan Validasi T-3")
 
 with st.sidebar:
     st.subheader("Pengaturan scanner")
@@ -542,9 +571,6 @@ left.metric("Aset tersedia", len(codes))
 mid.metric("Target scan", target_count)
 right.markdown(f"**Sumber data:** Yahoo Finance  \n<span class='note'>{universe_source}</span>", unsafe_allow_html=True)
 
-st.info("Universe IDX memakai endpoint direktori perusahaan tercatat BEI. Scan dijalankan secara multi-threaded (parallel) untuk kecepatan maksimal tanpa mengorbankan kestabilan.")
-
-# Task helper function untuk Multi-threading
 def _worker_task(code):
     time.sleep(0.05)
     try:
@@ -616,13 +642,16 @@ with rank_tab:
         table = []
         for rank, item in enumerate(view, 1):
             score = float(item["score"])
+            err_str = f"Err: {item['validation_mape']*100:.1f}%"
+            hit_str = f"{int(item['validation_hit_rate']*100)}%"
+            
             table.append({
                 "Rank": rank, "Pasar": item["market"], "Kode": item["code"],
-                "Kategori": "HIGH" if score >= 80 else "MEDIUM–HIGH" if score >= 60 else "MEDIUM",
-                "Skor": score, "GPR Return (%)": item["gpr_return_pct"],
-                "Uncertainty (%)": item.get("uncertainty_pct", np.nan),
+                "Skor": score, 
+                "Akurasi (T-3)": f"{hit_str} ({err_str})",
+                "GPR Return (%)": item["gpr_return_pct"],
                 "Tren": item["trend"], "Momentum": item["momentum"],
-                "Rel. Volume": item["relative_volume"], "Sinyal": item["signal"], "Harga": item["price"]
+                "Sinyal": item["signal"], "Harga": item["price"]
             })
         table_df = pd.DataFrame(table)
         st.dataframe(table_df, use_container_width=True, hide_index=True)
@@ -636,15 +665,46 @@ with detail_tab:
         selected = st.selectbox("Pilih aset", codes_ready)
         item = next(x for x in results if x["code"] == selected)
         a, b, c, d = st.columns(4)
-        a.metric("Harga terakhir", f"{item['price']:,.4f}")
-        b.metric("Tren", item["trend"])
-        c.metric("GPR Return", f"{item['gpr_return_pct']:+.2f}%")
-        d.metric("Uncertainty", f"{item.get('uncertainty_pct', float('nan')):.2f}%")
+        a.metric("Harga saat ini", f"{item['price']:,.4f}")
+        b.metric("Tren saat ini", item["trend"])
+        c.metric("Potensi Return (dari skrg)", f"{item['gpr_return_pct']:+.2f}%")
+        d.metric("Ketidakpastian", f"{item.get('uncertainty_pct', float('nan')):.2f}%")
+        
         preds = item.get("predictions", [])
         if preds:
-            chart = pd.DataFrame({"Candle": ["Sekarang"] + [f"+{p['step']}" for p in preds], "Harga": [item["price"]] + [p["price"] for p in preds]}).set_index("Candle")
-            st.line_chart(chart)
-            st.dataframe(pd.DataFrame(preds), use_container_width=True, hide_index=True)
+            st.markdown("##### Visualisasi Validasi (T-3) & Proyeksi Masa Depan")
+            chart_data = []
+            
+            chart_data.append({
+                "Candle": "Start (T-3)", 
+                "Proyeksi GPR": item["projection_start_price"],
+                "Harga Asli": item["projection_start_price"],
+                "Batas Atas": item["projection_start_price"],
+                "Batas Bawah": item["projection_start_price"],
+            })
+            
+            valid_count = sum(1 for p in preds if not p["is_future"])
+            for p in preds:
+                if p["is_future"]:
+                    lbl = f"Future +{p['step'] - valid_count}"
+                else:
+                    jarak = valid_count - p['step']
+                    lbl = f"Valid T-{jarak}" if jarak > 0 else "Hari Ini (T0)"
+                    
+                chart_data.append({
+                    "Candle": lbl,
+                    "Proyeksi GPR": p["price"],
+                    "Harga Asli": p["actual_price"],
+                    "Batas Atas": p["upper"],
+                    "Batas Bawah": p["lower"],
+                })
+            
+            df_chart = pd.DataFrame(chart_data).set_index("Candle")
+            st.line_chart(df_chart)
+            
+            view_df = pd.DataFrame(preds)
+            view_df = view_df.drop(columns=["is_future", "sigma_cum"], errors="ignore")
+            st.dataframe(view_df, use_container_width=True, hide_index=True)
     else:
         st.info("Scan batch pertama untuk melihat detail aset.")
 
