@@ -379,40 +379,35 @@ def analyze_one(market: str, code: str, timeframe: str, horizon: int) -> dict:
 
 
 @st.cache_data(ttl=7 * 24 * 60 * 60, show_spinner=False)
-def fetch_us_universe():
-    """Mengambil saham S&P 500 dan Nasdaq 100 (~550 emiten besar), cocok untuk Gotrade"""
-    # Tambahkan User-Agent agar tidak diblokir Wikipedia
+def fetch_us_universe_v2():
+    """Versi V2 agar cache lama otomatis hangus. Mengambil saham S&P 500 dan Nasdaq 100"""
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-    
-    # Ambil S&P 500
     sp500_url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
+    ndx_url = "https://en.wikipedia.org/wiki/Nasdaq-100"
+    
     try:
         resp = requests.get(sp500_url, headers=headers, timeout=15)
         sp500_tables = pd.read_html(resp.text)
         sp500_symbols = sp500_tables[0]['Symbol'].str.replace('.', '-', regex=False).tolist()
-    except Exception:
-        sp500_symbols = []
         
-    # Ambil Nasdaq 100
-    ndx_url = "https://en.wikipedia.org/wiki/Nasdaq-100"
-    try:
-        resp = requests.get(ndx_url, headers=headers, timeout=15)
-        ndx_tables = pd.read_html(resp.text)
+        resp2 = requests.get(ndx_url, headers=headers, timeout=15)
+        ndx_tables = pd.read_html(resp2.text)
         ndx_symbols = []
         for df in ndx_tables:
             if 'Ticker' in df.columns:
                 ndx_symbols = df['Ticker'].str.replace('.', '-', regex=False).tolist()
                 break
-    except Exception:
-        ndx_symbols = []
+                
+        symbols = list(dict.fromkeys(sp500_symbols + ndx_symbols))
         
-    symbols = list(dict.fromkeys(sp500_symbols + ndx_symbols))
-    
-    if len(symbols) < 100:
-        # Fallback manual apabila Wikipedia benar-benar down
-        return US_CODES
+        if len(symbols) < 100:
+            return US_CODES, "Gagal memproses Wikipedia (kurang dari 100), pakai fallback"
+            
+        return symbols, "Indeks S&P 500 & Nasdaq 100 (~550 saham terbesar, cocok untuk Gotrade)"
         
-    return symbols
+    except Exception as e:
+        # Menangkap dan mengembalikan pesan error asli jika gagal (misal karena lxml tidak ada)
+        return US_CODES, f"Error Wikipedia: {str(e)} (Memakai fallback 140 saham)"
 
 
 @st.cache_data(ttl=6 * 60 * 60, show_spinner=False)
@@ -493,10 +488,9 @@ def get_universe(market: str):
         except Exception:
             return FALLBACK_CODES.copy(), "Fallback BEI bawaan aplikasi; gagal mengambil direktori IDX"
     if market == "US":
-        try:
-            return fetch_us_universe(), "Indeks S&P 500 & Nasdaq 100 (~550 saham terbesar, cocok untuk Gotrade)"
-        except Exception:
-            return list(dict.fromkeys(US_CODES)), "Fallback saham AS pilihan; gagal mengambil direktori live"
+        # Memanggil fungsi v2 yang dipastikan menembus cache lama
+        codes, msg = fetch_us_universe_v2()
+        return codes, msg
     try:
         return fetch_crypto_universe(), "Yahoo Finance All Cryptocurrencies USD; refresh otomatis tiap 6 jam"
     except Exception:
@@ -530,8 +524,14 @@ with st.sidebar:
     auto_scan = st.checkbox("Otomatis scan sampai target", value=False, help="Jika aktif, tombol scan akan melanjutkan batch 100 aset demi 100 aset sampai target selesai.")
     min_score = st.slider("Skor minimum ranking", 40, 80, 80, 5)
     st.caption("Filter skor hanya memengaruhi ranking, bukan jumlah aset yang dianalisis.")
+    
     start_new = st.button("↻ Mulai scan baru", use_container_width=True)
     scan_next = st.button("▶ Mulai / lanjutkan scan", type="primary", use_container_width=True)
+    clear_cache_btn = st.button("🗑️ Hapus Cache Sistem", use_container_width=True)
+    
+if clear_cache_btn:
+    st.cache_data.clear()
+    st.rerun()
 
 codes, universe_source = get_universe(market)
 target_count = len(codes) if scan_size_label == "Semua tersedia" else min(int(scan_size_label), len(codes))
