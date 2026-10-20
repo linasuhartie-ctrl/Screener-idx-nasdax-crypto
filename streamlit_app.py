@@ -316,7 +316,7 @@ def gpr_project(df, horizon=10, training=30, momentum_len=5, vol_len=14,
     sigma_cum_final = math.sqrt(max(cumulative_variance, 0.0))
     uncertainty = 100.0 * sigma_cum_final / (abs(cumulative_return) + sigma_cum_final + 1e-10)
     
-    # Validation Logic
+    # Validation Logic (T-3)
     validation_errors = []
     hits = 0
     for p in predictions:
@@ -358,6 +358,7 @@ def analyze_one(market: str, code: str, timeframe: str, horizon: int) -> dict:
     result["code"] = code
     result["market"] = market
     
+    # RUMUS SKORING BARU
     hit_score = result["validation_hit_rate"] * 30
     mape_score = max(0, 20 - (result["validation_mape"] * 100 * 4))
     trend_score = 15 if result["trend"] == "BULLISH" else 0
@@ -377,58 +378,35 @@ def analyze_one(market: str, code: str, timeframe: str, horizon: int) -> dict:
     return result
 
 
-@st.cache_data(ttl=6 * 60 * 60, show_spinner=False)
+@st.cache_data(ttl=7 * 24 * 60 * 60, show_spinner=False)
 def fetch_us_universe():
-    urls = [
-        "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt",
-        "https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt",
-    ]
-    symbols = []
-    headers = {"User-Agent": "Mozilla/5.0 GPR-Market-Scanner/1.0"}
-    non_common = (
-        " exchange traded fund", " etf", " fund", " warrant", " rights", " right",
-        " units", " unit", " preferred stock", " preferred shares", " depositary share",
-        " senior note", " subordinated note", " notes due", " debenture", " bond",
-        " etn", " exchange traded note", " index fund", " money market", " mutual fund",
-        " when issued", " when distributed", " subscription receipt", " contingent value right",
-    )
-    for url in urls:
-        response = requests.get(url, timeout=25, headers=headers)
-        response.raise_for_status()
-        lines = response.text.splitlines()
-        if not lines:
-            continue
-        header = [x.strip() for x in lines[0].split("|")]
-        index = {name: i for i, name in enumerate(header)}
-        symbol_key = "Symbol" if "Symbol" in index else ("CQS Symbol" if "CQS Symbol" in index else "ACT Symbol")
-        symbol_idx = index.get(symbol_key, 0)
-        name_idx = index.get("Security Name")
-        test_idx = index.get("Test Issue")
-        etf_idx = index.get("ETF")
-        financial_idx = index.get("Financial Status")
-        for line in lines[1:]:
-            if not line or line.startswith("File Creation Time"):
-                continue
-            fields = line.split("|")
-            if len(fields) <= symbol_idx:
-                continue
-            symbol = fields[symbol_idx].strip().upper()
-            name = fields[name_idx].strip().lower() if name_idx is not None and len(fields) > name_idx else ""
-            test = fields[test_idx].strip().upper() if test_idx is not None and len(fields) > test_idx else "N"
-            etf = fields[etf_idx].strip().upper() if etf_idx is not None and len(fields) > etf_idx else "N"
-            financial = fields[financial_idx].strip().upper() if financial_idx is not None and len(fields) > financial_idx else "N"
-            if not symbol or test == "Y" or etf == "Y":
-                continue
-            if financial in {"D", "E", "G", "H", "J", "K", "Q"}:
-                continue
-            if any(marker in name for marker in non_common):
-                continue
-            if not all(c.isalnum() or c in ".-^" for c in symbol):
-                continue
-            symbols.append(symbol.replace(".", "-"))
-    symbols = list(dict.fromkeys(symbols))
-    if len(symbols) < 1000:
-        raise RuntimeError(f"Direktori saham AS tidak lengkap setelah filter ({len(symbols)} simbol).")
+    """Mengambil saham S&P 500 dan Nasdaq 100 (~550 emiten besar), cocok untuk Gotrade"""
+    # Ambil S&P 500
+    sp500_url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
+    try:
+        sp500_tables = pd.read_html(sp500_url)
+        sp500_symbols = sp500_tables[0]['Symbol'].str.replace('.', '-', regex=False).tolist()
+    except Exception:
+        sp500_symbols = []
+        
+    # Ambil Nasdaq 100
+    ndx_url = "https://en.wikipedia.org/wiki/Nasdaq-100"
+    try:
+        ndx_tables = pd.read_html(ndx_url)
+        ndx_symbols = []
+        for df in ndx_tables:
+            if 'Ticker' in df.columns:
+                ndx_symbols = df['Ticker'].str.replace('.', '-', regex=False).tolist()
+                break
+    except Exception:
+        ndx_symbols = []
+        
+    symbols = list(dict.fromkeys(sp500_symbols + ndx_symbols))
+    
+    if len(symbols) < 100:
+        # Fallback manual apabila Wikipedia gagal ditarik
+        return US_CODES
+        
     return symbols
 
 
@@ -511,7 +489,7 @@ def get_universe(market: str):
             return FALLBACK_CODES.copy(), "Fallback BEI bawaan aplikasi; gagal mengambil direktori IDX"
     if market == "US":
         try:
-            return fetch_us_universe(), "Direktori Nasdaq Trader: saham/simbol AS lintas bursa; refresh otomatis tiap 6 jam"
+            return fetch_us_universe(), "Indeks S&P 500 & Nasdaq 100 (~550 saham terbesar, cocok untuk Gotrade)"
         except Exception:
             return list(dict.fromkeys(US_CODES)), "Fallback saham AS pilihan; gagal mengambil direktori live"
     try:
@@ -534,7 +512,7 @@ div.stButton > button {border-radius:10px; min-height:42px; font-weight:600;}
 """, unsafe_allow_html=True)
 
 st.title("📈 GPR MARKET SCANNER")
-st.caption("Satu dashboard untuk saham BEI, saham Amerika, dan aset kripto dengan Validasi T-3")
+st.caption("Satu dashboard untuk saham BEI, saham Amerika (Gotrade Ready), dan aset kripto dengan Validasi T-3")
 
 with st.sidebar:
     st.subheader("Pengaturan scanner")
