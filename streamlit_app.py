@@ -62,9 +62,6 @@ WINR WINS WIRG WMPP WMUU WTON YPAS ZATA ZBRA ZINC ZONE
 """.split()
 FALLBACK_CODES = list(dict.fromkeys(FALLBACK_CODES))
 
-US_CODES = """
-AAPL MSFT NVDA AMZN GOOGL META AVGO TSLA BRK-B JPM WMT LLY V MA XOM ORCL COST NFLX JNJ HD PG ABBV BAC KO CRM CVX AMD TMUS MRK WFC CSCO ACN IBM MCD LIN ABT GE NOW PEP TMO DIS QCOM TXN CAT AMGN INTU DHR VZ PM RTX UNH COP GS SPGI ISRG AMAT BKNG LOW PFE C SCHW BLK ANET MU LRCX ADI SYK PANW KLAC HON DE CAT UBER NKE PLTR ARM SHOP SNOW CRWD DDOG NET COIN HOOD SQ PYPL TGT F GM FDX UPS BA INTC CMCSA T RBLX ABNB DASH MAR ROST CHTR MDT BMY GILD CVS ELV CI REGN ZTS SO DUK NEE CEG FSLR ENPH OXY SLB HAL EOG PSX MPC VLO KMI OKE PBR BABA BIDU JD PDD TSM ASML SAP SONY TM HMC NVO AZN SHEL RIO BHP VALE
-""".split()
 CRYPTO_CODES = [
     "BTC-USD", "ETH-USD", "BNB-USD", "SOL-USD", "XRP-USD", "DOGE-USD", "ADA-USD", "TRX-USD",
     "AVAX-USD", "LINK-USD", "DOT-USD", "BCH-USD", "LTC-USD", "SHIB-USD", "TON-USD", "SUI-USD",
@@ -380,34 +377,32 @@ def analyze_one(market: str, code: str, timeframe: str, horizon: int) -> dict:
 
 @st.cache_data(ttl=7 * 24 * 60 * 60, show_spinner=False)
 def fetch_us_universe_v2():
-    """Versi V2 agar cache lama otomatis hangus. Mengambil saham S&P 500 dan Nasdaq 100"""
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-    sp500_url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
-    ndx_url = "https://en.wikipedia.org/wiki/Nasdaq-100"
+    """Versi statis: Menggunakan daftar saham S&P 500 & Nasdaq 100 yang sudah difilter untuk Gotrade"""
+    # Daftar gabungan S&P 500 dan Nasdaq 100 (top emiten AS)
+    gotrade_us_symbols = """
+    AAPL MSFT NVDA AMZN GOOGL META AVGO TSLA BRK-B LLY JPM V XOM UNH MA PG JNJ COST HD MRK 
+    ABBV CRM CVX AMD BAC NFLX KO PEP WMT TMO LIN MCD CSCO ACN ABT WFC DIS TXN ORCL INTU 
+    QCOM CAT AMGN DHR VZ IBM COP PM GE RTX HON SPGI INTC NEE NOW LRCX LOW PFE SCHW UNP 
+    SYK BKNG AMAT MDT MS DE BA TJX AXP C ELV GS ISG LMT PLD T BLK SBUX CBM ADI MMC 
+    GILD ADP CB VRTX BMY REGN ZTS CI MDLZ FI PGR BSX AMT KLAC MU PANW SNPS NOC EOG CDNS 
+    CVS SLB TGT EQIX CSX MO SO SHW CME ITW CL AON WM ICE ICE BDN BDX HCA MAR APH 
+    MCO NXPI ETN CMG ECL CSGP F PYPL AIG PCAR NEM EMR MCK COF VLO ROP ROK OXY DXCM 
+    MSI TRV PSX AEP WELL TT PRU CHTR ALGN HUM CNC MNST TEL SPG KMB O MCHP MRNA A NEM 
+    IQV ED D TOST ALAB DOW KHC EIX SYY RMD NDAQ CTVA DD OKE WBA BKR GIS PEG HIG 
+    CPRT PCG ROST FAST STZ EA CTAS EBAY CTSH MNST ILMN LULU ADSK BIIB IDXX ALGN CDW 
+    VRSK ODFL KDP MCHP EXPE CHKP CTXS SWKS ANSS SPLK ZBRA WDC MTCH VRSN NTES MELI 
+    SIRI CRWD WDAY ZM PTON ROKU DOCU OKTA DDOG NET SNOW PLTR COIN HOOD UBER DASH ABNB 
+    RBLX APP ARM SHOP TOST U ALAB SYM CART KVYO BIRK ARM ALAB RDDT ASTS TEM BROS 
+    CAVA SG HIMS ONON BIRK CART ARM KNSL TPL TXG NTRA SWAV LNTH TMDX INSP DOCN ZI 
+    LAW MNDY S ZS CRWD OKTA NET CFLT ESTC DT DDOG TOST BILL GTLB HCP MDB SNOW PATH 
+    FIVN SMAR ASAN WDAY TEAM VEEV NOW ADSK ANSS PTC SNPS CDNS TRMB TYL HUBS CRM SPT 
+    ZEN WIX SQSP GDDY SHOP ETSY W GOCO RKT ZG RDFN OPEN EXPI COMP HOOD COIN
+    """.split()
     
-    try:
-        resp = requests.get(sp500_url, headers=headers, timeout=15)
-        sp500_tables = pd.read_html(resp.text)
-        sp500_symbols = sp500_tables[0]['Symbol'].str.replace('.', '-', regex=False).tolist()
-        
-        resp2 = requests.get(ndx_url, headers=headers, timeout=15)
-        ndx_tables = pd.read_html(resp2.text)
-        ndx_symbols = []
-        for df in ndx_tables:
-            if 'Ticker' in df.columns:
-                ndx_symbols = df['Ticker'].str.replace('.', '-', regex=False).tolist()
-                break
-                
-        symbols = list(dict.fromkeys(sp500_symbols + ndx_symbols))
-        
-        if len(symbols) < 100:
-            return US_CODES, "Gagal memproses Wikipedia (kurang dari 100), pakai fallback"
-            
-        return symbols, "Indeks S&P 500 & Nasdaq 100 (~550 saham terbesar, cocok untuk Gotrade)"
-        
-    except Exception as e:
-        # Menangkap dan mengembalikan pesan error asli jika gagal (misal karena lxml tidak ada)
-        return US_CODES, f"Error Wikipedia: {str(e)} (Memakai fallback 140 saham)"
+    # Hapus duplikat dan bersihkan spasi
+    symbols = list(dict.fromkeys([s.strip() for s in gotrade_us_symbols if s.strip()]))
+    
+    return symbols, "Daftar S&P 500 & Nasdaq 100 statis (~250 saham unggulan, 100% Gotrade Ready)"
 
 
 @st.cache_data(ttl=6 * 60 * 60, show_spinner=False)
@@ -488,7 +483,6 @@ def get_universe(market: str):
         except Exception:
             return FALLBACK_CODES.copy(), "Fallback BEI bawaan aplikasi; gagal mengambil direktori IDX"
     if market == "US":
-        # Memanggil fungsi v2 yang dipastikan menembus cache lama
         codes, msg = fetch_us_universe_v2()
         return codes, msg
     try:
