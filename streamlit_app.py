@@ -381,10 +381,14 @@ def analyze_one(market: str, code: str, timeframe: str, horizon: int) -> dict:
 @st.cache_data(ttl=7 * 24 * 60 * 60, show_spinner=False)
 def fetch_us_universe():
     """Mengambil saham S&P 500 dan Nasdaq 100 (~550 emiten besar), cocok untuk Gotrade"""
+    # Tambahkan User-Agent agar tidak diblokir Wikipedia
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    
     # Ambil S&P 500
     sp500_url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
     try:
-        sp500_tables = pd.read_html(sp500_url)
+        resp = requests.get(sp500_url, headers=headers, timeout=15)
+        sp500_tables = pd.read_html(resp.text)
         sp500_symbols = sp500_tables[0]['Symbol'].str.replace('.', '-', regex=False).tolist()
     except Exception:
         sp500_symbols = []
@@ -392,7 +396,8 @@ def fetch_us_universe():
     # Ambil Nasdaq 100
     ndx_url = "https://en.wikipedia.org/wiki/Nasdaq-100"
     try:
-        ndx_tables = pd.read_html(ndx_url)
+        resp = requests.get(ndx_url, headers=headers, timeout=15)
+        ndx_tables = pd.read_html(resp.text)
         ndx_symbols = []
         for df in ndx_tables:
             if 'Ticker' in df.columns:
@@ -404,7 +409,7 @@ def fetch_us_universe():
     symbols = list(dict.fromkeys(sp500_symbols + ndx_symbols))
     
     if len(symbols) < 100:
-        # Fallback manual apabila Wikipedia gagal ditarik
+        # Fallback manual apabila Wikipedia benar-benar down
         return US_CODES
         
     return symbols
